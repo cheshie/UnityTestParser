@@ -1,8 +1,11 @@
-import subprocess
+from subprocess import Popen
 import argparse
-from os.path import join
+from os.path import join, splitext, exists
+from clear_screen import clear
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from re import findall
+from time import sleep
 
 ### Original command - example of running tests for example project on Unity 2018.3.2f1
 # "C:\Program Files\Unity\Hub\Editor\2018.3.2f1\Editor\Unity.exe" -batchmode -projectPath "C:\Users\PrzemyslawSamsel\OneDrive - Apptimia Sp. z o.o\Documents\Crashteroids-project-files\Crashteroids\Crashteroids Starter" -runTests -testPlatform playmode
@@ -17,7 +20,7 @@ septs = "{:#^50}".format('')
 
 # Test run aligns and header
 algl  = "{:<17}" # align left
-algr  = "{:>28}" # align right
+algr  = "{:>29}" # align right
 alght = "\n{:*^50}\n" # align header top
 alghb = "{:-^50}"     # align header bottom
 trheader = " test-run " # test-run header
@@ -35,7 +38,7 @@ tsheader = " test-suites "
 algtsht  = "\n{:*^50}\n" # Align test suite header top
 algtshb  = "{:-^50}" # -/- bottom
 tsalgl   = "{:<19}"  # test suite align left
-tsalgr   = "{:>30}"  # test suite align right
+tsalgr   = "{:>31}"  # test suite align right
 # Attribute's names 
 tsattrs  = [
         ("Test name:", 'fullname'),
@@ -48,6 +51,7 @@ tsattrs  = [
 # Test Case params - header
 tcheader = " test cases "
 tcalgt   = "{:#^50}"
+tcalgl   = "{:<12}"
 # Test Case tags
 tcattrs = [
         ("TestID", "id"), 
@@ -58,149 +62,199 @@ tcattrs = [
         ("Result", "result")
 ]
 
-#TODO: out failure message
-# implement progress bar while waiting for tests
-# todo: output in json
+# Handling TestCase failure
+fail   = "Failed"
+reason = "Reason:"
+failtag = "failure"
+msgtag = "message"
+stacktrace = "Stacktrace:"
+stacktracetag = "stack-trace"
+newlinefillregx = "(?s).{,50}" # every 50 chars newline
 
-def prepare_args():
-  parser = argparse.ArgumentParser(description=\
-          'Automate Unity Testing from commandline')
-  parser.add_argument('-v', '--unityver', type=str, 
-          default='2018.3.2f1', help='Version of Unity')
-  parser.add_argument('-b', '--unitybasedir', type=str,
-          default=hub_path_windows, help='Base dir of all versions of Unity')
-  parser.add_argument('-p', '--projpath', type=str, 
-          help='Full path of project to be tested', required=False) #TODO => test (True)
-  parser.add_argument('-t', '--testtype', type=str, 
-          default='play', choices=['play, editor'], help='Run either editor or playmode tests')
-  parser.add_argument('-o', '--outfile', 
-          help='Path to results XML file exported after tests'
-               'by Unity. Default location is project folder') # default output file option see below
-  parser.add_argument('-f', '--form', type=str,
-          default='stdout', choices=['stdout', 'html', 'json'], help="Format of parsed XML. Could"
-          "either be sent to stdout or parsed to specific filetype")
-  global args
-  args = parser.parse_args()
-  
-  # Path to unity executable
-  args.unity_exec_path = join(args.unitybasedir, args.unityver, 'Editor', 'Unity.exe')
-  # Used to not spawn graphical UI 
-  args.batch = '-batchmode'
-  # Project path to be debugged
-  args.ppath = '-projectPath'
-  # Arguments passed to specific type of tests
-  args.test_args = []
-  # Output file
-  args.output = ['-editorTestsResultFile']
+# Executing Unit Tests
+testwait = "[*] Executing tests in Unity [ "
+testwaitanim = ['-', '\\', '|', '/']
+testwaitend = " ]"
 
-  #TODO: Just for testing:
-  args.projpath = r"C:\Users\PrzemyslawSamsel\OneDrive - Apptimia Sp. z o.o\Documents\Crashteroids-project-files\Crashteroids\Crashteroids Starter"
+class UnityTestParser:
+  def __init__(self):
+    self.report = ""
+    self.ParseArgs()
+
+  def ParseArgs(self):
+    parser = argparse.ArgumentParser(description=\
+            'Automate Unity Testing from commandline')
+    parser.add_argument('-v', '--unityver', type=str, 
+            default='2018.3.2f1', help='Version of Unity')
+    parser.add_argument('-b', '--unitybasedir', type=str,
+            default=hub_path_windows, help='Base dir of all versions of Unity')
+    parser.add_argument('-p', '--projpath', type=str, 
+            help='Full path of project to be tested', required=False) #TODO => test (True)
+    parser.add_argument('-t', '--testtype', type=str, 
+            default='play', choices=['play, editor'], help='Run either editor or playmode tests')
+    parser.add_argument('-o', '--outfile', 
+            help='Path to results XML file exported after tests'
+                'by Unity. Default location is project folder') # default output file option see below
+    parser.add_argument('-f', '--form', type=str,
+            default='stdout', choices=['stdout', 'html', 'json'], help="Format of parsed XML. Could"
+            "either be sent to stdout or parsed to specific filetype")
+    self.args = parser.parse_args()
     
-  # Test output file - user defined
-  if args.outfile:
-  # Output file for results
-    args.output += [args.outfile]
-  # Test output file - default path (project)
-  else:
-    # TODO => only testing 
-    filename = "TestResults-637497000092310934.xml" #'TestResults-637496073708155152.xml'
-    #filename = 'TestResults-' + datetime.now().strftime('%d%m%Y%H%M%S') + '.xml' 
-    args.output += [join(args.projpath, filename)]
-  
-  # Run tests in either playmode (chosing playmode platform) or editor tests
-  if args.testtype == 'play':
-    test_type = '-runTests'
-    test_platform = '-testPlatform'
-    mode = 'playmode'
-    args.test_args = [test_type, test_platform, mode]
-  elif args.testtype == 'editor':
-    test_type = '-runEditorTests'
-    args.test_args = [test_type]
-  
-  return args
-#
+    # Path to unity executable
+    self.args.unity_exec_path = join(self.args.unitybasedir, self.args.unityver, 'Editor', 'Unity.exe')
+    # Used to not spawn graphical UI 
+    self.args.batcharg = '-batchmode'
+    # Project path to be debugged
+    self.args.projpatharg = '-projectPath'
+    # Arguments passed to specific type of tests
+    self.args.test_args = []
+    # Output file
+    self.args.output = ['-editorTestsResultFile']
 
-# Run unity exec with proper parameters
-def run_unitytests():
-  #out(args.unity_exec_path, args.batch, args.ppath, args.projpath, *args.test_args, *args.output)
-  #exit()
-  process = subprocess.Popen([args.unity_exec_path, args.batch, args.ppath, args.projpath] + args.test_args, #+ #args.output,
-                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-  stdout, stderr = process.communicate()
-  out(stdout, stderr)
-#
-"""
-Pare XML document generated by Unity. In general, structure of this doc is similar to:
-<test-run>
-   <test-suite type=TestSuite>
-        <test-suite type=Assembly>
-           <properties>
-           </properties>
-           <test-suite type=TestFixture>
-               <===# Listing of all test cases #===>
-           </test-suite>
-           <test-suite type=TestFixture>
+    # Test output file - user defined
+    if self.args.outfile:
+    # Output file for results
+      self.args.output += [args.outfile]
+    # Test output file - default path (project)
+    else:
+      # TODO => only testing 
+      #self.filename = #"TestResults-637497000092310934.xml" #'TestResults-637496073708155152.xml'
+      self.filename = 'TestResults-' + datetime.now().strftime('%d%m%Y%H%M%S') + '.xml' 
+      self.args.output += [join(self.args.projpath, self.filename)]
+    
+    # Run tests in either playmode (chosing playmode platform) or editor tests
+    if self.args.testtype == 'play':
+      test_type = '-runTests'
+      test_platform = '-testPlatform'
+      mode = 'playmode'
+      self.args.test_args = [test_type, test_platform, mode]
+    elif self.args.testtype == 'editor':
+      test_type = '-runEditorTests'
+      self.args.test_args = [test_type]
+  #
+
+  # Run unity exec with proper parameters
+  def RunTests(self):
+    # Prepare test arguments
+    testargs = [
+        self.args.unity_exec_path, 
+        self.args.batcharg,
+        self.args.projpatharg,
+        self.args.projpath,
+        *self.args.test_args,
+        *self.args.output
+    ]
+    
+    # Run tests
+    process = Popen(testargs, shell=True)
+    
+    # Wait for Unity to execute tests and generate XML results
+    i = 0
+    while not exists(join(self.args.projpath, self.filename)):
+      # Print "progress bar"
+      print(testwait + testwaitanim[i] + testwaitend)
+      i = (i + 1) % len(testwaitanim)
+      sleep(0.1)
+      clear()
+  #
+
+  """
+  Pare XML document generated by Unity. In general, structure of this doc is similar to:
+  <test-run>
+    <test-suite type=TestSuite>
+          <test-suite type=Assembly>
+            <properties>
+            </properties>
+            <test-suite type=TestFixture>
                 <===# Listing of all test cases #===>
-           </test-suite>
-                (...)
-        </test-suite>
-   </test-suite>
-</test-run>
+            </test-suite>
+            <test-suite type=TestFixture>
+                  <===# Listing of all test cases #===>
+            </test-suite>
+                  (...)
+          </test-suite>
+    </test-suite>
+  </test-run>
 
-This structure is important, bcoz this function looks for any test-suite tags
-with type attribute of value TestFixture, and then it parses all test cases one by one
-"""
-def parse_tests_results():
-  # Test document root handle
-  htest = ET.parse(args.output[1]).getroot()
-  # Test Run (general stats)
-  parse_tr(htest)
-  # Specific Test Suites
-  parse_ts(htest)
-#
-
-def parse_tcs(tests):
-  out(tcalgt.format(tcheader))
-  for test in tests:
-    for attr in tcattrs:
-      out("{:<12}".format(f"# {attr[0]}:"), 
-          "{:<12}".format(f"{test.attrib[attr[1]]}"))
-    out(septc)
-#
-
-def parse_tr(htest):
-  # Header
-  out(alght.format(trheader) + alghb.format(''))
-  # Attributes of Test Run
-  for at in trattrs:
-    val = htest.attrib[at[1]]
-    out("* " + algl.format(at[0]), algr.format(val) + " *")
-  # Bottom header
-  out(alghb.format('') + alght.format(''), lend="")
-#
-
-def parse_ts(htest):
-  # Header
-  out(algtsht.format(tsheader) + algtshb.format(''))
-  # Test Suites
-  for ts in htest.findall(".//test-suite[@type='TestFixture']"):
-    # Separator between testcases
-    out(septs)
-    # Test Suite Attributes
-    for at in tsattrs:
-      out(tsalgl.format(at[0]), tsalgr.format(ts.attrib[at[1]]))
-    # Bottom header of test suite
-    out(algtshb.format(''))
-    # Parse Test Cases
-    parse_tcs(ts.findall("./test-case"))
-#
-
-def out(*printargs, lend='\n'):
-  if args.form == "stdout":
-    print(*printargs, end=lend)
+  This structure is important, bcoz this function looks for any test-suite tags
+  with type attribute of value TestFixture, and then it parses all test cases one by one
+  """
+  def ParseResults(self):
+    # Test document root handle
+    self.htest = ET.parse(self.args.output[1]).getroot()
+    # Test Run (general stats)
+    self.parse_tr()
+    # Specific Test Suites
+    self.parse_ts()
+    self.PrintReport()
+  #
+  
+  # Parse Test Cases
+  def parse_tcs(self, tests):
+    self.out(tcalgt.format(tcheader))
+    for test in tests:
+      for attr in tcattrs:
+        self.out(tcalgl.format(f"# {attr[0]}:"), 
+                 tcalgl.format(f"{test.attrib[attr[1]]}"))
+        # If result equals Failed
+        if fail in test.attrib[attr[1]]:
+          self.out(reason)
+          self.out(test.find(failtag).find(msgtag).text) 
+          self.out(stacktrace)
+          # Wrapping stacktrace with newline every n chars
+          st = test.find(failtag).find(stacktracetag).text
+          self.out("\n".join(findall(newlinefillregx, st))[:-1])
+      self.out(septc)
+  #
+  
+  # Parse Test Run
+  def parse_tr(self):
+    # Header
+    self.out(alght.format(trheader) + alghb.format(''))
+    # Attributes of Test Run
+    for at in trattrs:
+      val = self.htest.attrib[at[1]]
+      self.out("* " + algl.format(at[0]), algr.format(val) + " *")
+    # Bottom header
+    self.out(alghb.format('') + alght.format(''), lend="")
+  #
+  
+  # Parse Test Suites
+  def parse_ts(self):
+    # Header
+    self.out(algtsht.format(tsheader) + algtshb.format(''))
+    # Test Suites
+    for ts in self.htest.findall(".//test-suite[@type='TestFixture']"):
+      # Separator between testcases
+      self.out(septs)
+      # Test Suite Attributes
+      for at in tsattrs:
+        self.out(tsalgl.format(at[0]), tsalgr.format(ts.attrib[at[1]]))
+      # Bottom header of test suite
+      self.out(algtshb.format(''))
+      # Parse Test Cases
+      self.parse_tcs(ts.findall("./test-case"))
+  #
+  
+  # Add next lines to report string
+  def out(self, *printargs, lend='\n'):
+    for arg in printargs:
+      self.report += arg
+    self.report += lend
+  #
+  
+  # Print string to either stdout or a file
+  def PrintReport(self):
+    if self.args.form == 'stdout':
+      print(self.report)
+    elif self.args.form == 'html':
+      parsedfile = open(join(self.args.projpath, splitext(self.filename)[0] + ".html"), 'w')
+      self.report = self.report.replace('\n', '<br/>')
+      parsedfile.write(f"<html>{self.report}</html>")
+  #
 
 
 if __name__ == '__main__':
-  prepare_args() 
-  #run_unitytests(args)
-  parse_tests_results()
+  tp = UnityTestParser()
+  tp.RunTests()
+  tp.ParseResults()
