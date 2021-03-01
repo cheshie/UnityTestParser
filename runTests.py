@@ -69,12 +69,27 @@ failtag = "failure"
 msgtag = "message"
 stacktrace = "Stacktrace:"
 stacktracetag = "stack-trace"
-newlinefillregx = "(?s).{,50}" # every 50 chars newline
+newlinefillregx = "(?s).{,50}" # newline every 50 chars
 
 # Executing Unit Tests
 testwait = "[*] Executing tests in Unity [ "
 testwaitanim = ['-', '\\', '|', '/']
 testwaitend = " ]"
+
+# Coloring output in terminal
+# Green keywords
+grn_kwds = ['Passed', 'passed']
+red_kwds = ['Failed', 'failed']
+blu_kwds = ['test-run', 'test-suites', 'test cases']
+# Green beginning and end escape codes
+grn_cd = '\x1b[6;30;42m'
+red_cd = '\x1b[0;30;41m'
+blu_cd = '\x1b[0;32;44m'
+endcode = '\x1b[0m'
+kwds = list(zip(grn_kwds, [grn_cd] * len(grn_kwds))) +\
+       list(zip(red_kwds, [red_cd] * len(red_kwds))) +\
+       list(zip(blu_kwds, [blu_cd] * len(blu_kwds)))
+
 
 class UnityTestParser:
   def __init__(self):
@@ -98,8 +113,13 @@ class UnityTestParser:
     parser.add_argument('-f', '--form', type=str,
             default='stdout', choices=['stdout', 'html', 'json'], help="Format of parsed XML. Could"
             "either be sent to stdout or parsed to specific filetype")
+    parser.add_argument('--short', action='store_true', help="If present, prints test results as a short summary"
+            " (this also includes error messages).")
+    parser.add_argument('--nocolor', action='store_false', help='If this option is present, '
+    '')
     self.args = parser.parse_args()
     
+    # Specyfing arguments passed to Unity in terminal
     # Path to unity executable
     self.args.unity_exec_path = join(self.args.unitybasedir, self.args.unityver, 'Editor', 'Unity.exe')
     # Used to not spawn graphical UI 
@@ -119,7 +139,7 @@ class UnityTestParser:
     else:
       # TODO => only testing 
       #self.filename = #"TestResults-637497000092310934.xml" #'TestResults-637496073708155152.xml'
-      self.filename = 'TestResults-' + datetime.now().strftime('%d%m%Y%H%M%S') + '.xml' 
+      self.filename = "TestResults-01032021104556.xml" #'TestResults-' + datetime.now().strftime('%d%m%Y%H%M%S') + '.xml' 
       self.args.output += [join(self.args.projpath, self.filename)]
     
     # Run tests in either playmode (chosing playmode platform) or editor tests
@@ -169,7 +189,7 @@ class UnityTestParser:
                 <===# Listing of all test cases #===>
             </test-suite>
             <test-suite type=TestFixture>
-                  <===# Listing of all test cases #===>
+                <===# Listing of all test cases #===>
             </test-suite>
                   (...)
           </test-suite>
@@ -190,21 +210,27 @@ class UnityTestParser:
   #
   
   # Parse Test Cases
-  def parse_tcs(self, tests):
-    self.out(tcalgt.format(tcheader))
+  def parse_tcs(self, ts):
+    tests = ts.findall("./test-case")
+    if not self.args.short: 
+      self.out(tcalgt.format(tcheader))
     for test in tests:
       for attr in tcattrs:
-        self.out(tcalgl.format(f"# {attr[0]}:"), 
-                 tcalgl.format(f"{test.attrib[attr[1]]}"))
+        if not self.args.short or fail in test.attrib.values(): 
+          self.out(tcalgl.format(f"# {attr[0]}:"), 
+                  tcalgl.format(f"{test.attrib[attr[1]]}"))
         # If result equals Failed
         if fail in test.attrib[attr[1]]:
           self.out(reason)
           self.out(test.find(failtag).find(msgtag).text) 
-          self.out(stacktrace)
+          # Stacktrace is not printed in short mode
+          if not self.args.short:
+            self.out(stacktrace)
           # Wrapping stacktrace with newline every n chars
-          st = test.find(failtag).find(stacktracetag).text
-          self.out("\n".join(findall(newlinefillregx, st))[:-1])
-      self.out(septc)
+            st = test.find(failtag).find(stacktracetag).text
+            self.out("\n".join(findall(newlinefillregx, st))[:-1])
+      if not self.args.short: 
+        self.out(septc)
   #
   
   # Parse Test Run
@@ -216,7 +242,8 @@ class UnityTestParser:
       val = self.htest.attrib[at[1]]
       self.out("* " + algl.format(at[0]), algr.format(val) + " *")
     # Bottom header
-    self.out(alghb.format('') + alght.format(''), lend="")
+    if not self.args.short: 
+      self.out(alghb.format('') + alght.format(''), lend="")
   #
   
   # Parse Test Suites
@@ -226,14 +253,19 @@ class UnityTestParser:
     # Test Suites
     for ts in self.htest.findall(".//test-suite[@type='TestFixture']"):
       # Separator between testcases
-      self.out(septs)
+      if not self.args.short: 
+        self.out(septs)
       # Test Suite Attributes
       for at in tsattrs:
         self.out(tsalgl.format(at[0]), tsalgr.format(ts.attrib[at[1]]))
+      # If short is not present - print separator
+      # If short is present BUT no test case failed - print separator
+      # If short is present BUT the result is failed (because any of tc failed) - do not print
+      if not self.args.short or self.args.short and fail not in ts.attrib.values():
       # Bottom header of test suite
-      self.out(algtshb.format(''))
+        self.out(algtshb.format(''))
       # Parse Test Cases
-      self.parse_tcs(ts.findall("./test-case"))
+    self.parse_tcs(ts)
   #
   
   # Add next lines to report string
@@ -246,6 +278,10 @@ class UnityTestParser:
   # Print string to either stdout or a file
   def PrintReport(self):
     if self.args.form == 'stdout':
+      # Insert color escape codes in report
+      if self.args.nocolor:
+        for x in kwds: 
+          self.report = self.report.replace(x[0], x[1] + x[0] + endcode)
       print(self.report)
     elif self.args.form == 'html':
       parsedfile = open(join(self.args.projpath, splitext(self.filename)[0] + ".html"), 'w')
